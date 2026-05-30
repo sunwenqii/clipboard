@@ -4,7 +4,9 @@ import hashlib
 import secrets
 import logging
 import time
+import threading
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -20,16 +22,15 @@ HASH_SALT = os.environ.get('HASH_SALT', 'my-secret-salt')
 ISSUED_TOKENS = {}
 TOKEN_TTL = int(os.environ.get('SESSION_TOKEN_TTL', '3600'))
 PROXY_COUNT = int(os.environ.get('PROXY_COUNT', '1'))
+MAX_TEXT_LENGTH = int(os.environ.get('MAX_TEXT_LENGTH', '524288'))
+_data_lock = threading.Lock()
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=PROXY_COUNT, x_proto=PROXY_COUNT, x_host=PROXY_COUNT, x_port=PROXY_COUNT)
 
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 
 def init_data():
@@ -131,7 +132,6 @@ def ping():
 
 @app.route('/api/save', methods=['POST'])
 def save_text():
-    """保存新文本记录（可选密码保护）"""
     try:
         token = request.headers.get('X-SESSION-TOKEN')
         if not is_valid_session_token(token):
@@ -141,19 +141,22 @@ def save_text():
         password = (data.get('password') or '').strip()
         if not text:
             return jsonify({'success': False, 'message': '文本内容不能为空'})
+        if len(text.encode('utf-8')) > MAX_TEXT_LENGTH:
+            return jsonify({'success': False, 'message': f'文本内容不能超过 {MAX_TEXT_LENGTH // 1024}KB'})
         client_ip = get_client_ip()
-        all_data = load_data()
-        text_id = max((int(x.get('id', 0)) for x in all_data), default=0) + 1
-        text_data = {
-            'id': text_id,
-            'content': text,
-            'protected': bool(password),
-            'password_hash': hash_password(password) if password else None,
-            'timestamp': datetime.now().isoformat(),
-            'ip_address': client_ip
-        }
-        all_data.append(text_data)
-        save_data(all_data)
+        with _data_lock:
+            all_data = load_data()
+            text_id = max((int(x.get('id', 0)) for x in all_data), default=0) + 1
+            text_data = {
+                'id': text_id,
+                'content': text,
+                'protected': bool(password),
+                'password_hash': hash_password(password) if password else None,
+                'timestamp': datetime.now().isoformat(),
+                'ip_address': client_ip
+            }
+            all_data.append(text_data)
+            save_data(all_data)
         logging.info(f"save, id: {text_id}, ip: {client_ip}")
         return jsonify({'success': True, 'message': '保存成功', 'id': text_id})
     except Exception as e:
@@ -214,26 +217,26 @@ def get_text(id):
 
 @app.route('/api/delete/<int:id>', methods=['POST'])
 def delete_text(id):
-    """删除单条记录（受保护条目需密码）"""
     try:
-        all_data = load_data()
-        item = next((x for x in all_data if int(x.get('id', -1)) == id), None)
-        if not item:
-            return jsonify({'success': False, 'message': '记录不存在'}), 404
-        if item.get('protected'):
-            token = request.headers.get('X-SESSION-TOKEN')
-            if not is_valid_session_token(token):
-                return jsonify({'success': False, 'message': '未授权访问'}), 401
-            data = request.get_json(force=True) or {}
-            password = (data.get('password') or '').strip()
-            if not password or hash_password(password) != item.get('password_hash'):
-                return jsonify({'success': False, 'message': '密码错误'}), 401
-        else:
-            token = request.headers.get('X-SESSION-TOKEN')
-            if not is_valid_session_token(token):
-                return jsonify({'success': False, 'message': '未授权访问'}), 401
-        new_data = [x for x in all_data if int(x.get('id', -1)) != id]
-        save_data(new_data)
+        with _data_lock:
+            all_data = load_data()
+            item = next((x for x in all_data if int(x.get('id', -1)) == id), None)
+            if not item:
+                return jsonify({'success': False, 'message': '记录不存在'}), 404
+            if item.get('protected'):
+                token = request.headers.get('X-SESSION-TOKEN')
+                if not is_valid_session_token(token):
+                    return jsonify({'success': False, 'message': '未授权访问'}), 401
+                data = request.get_json(force=True) or {}
+                password = (data.get('password') or '').strip()
+                if not password or hash_password(password) != item.get('password_hash'):
+                    return jsonify({'success': False, 'message': '密码错误'}), 401
+            else:
+                token = request.headers.get('X-SESSION-TOKEN')
+                if not is_valid_session_token(token):
+                    return jsonify({'success': False, 'message': '未授权访问'}), 401
+            new_data = [x for x in all_data if int(x.get('id', -1)) != id]
+            save_data(new_data)
         logging.info(f"delete, id: {id}, ip: {get_client_ip()}")
         return jsonify({'success': True, 'message': '删除成功'})
     except Exception as e:
@@ -243,7 +246,6 @@ def delete_text(id):
 
 @app.route('/api/clear-all', methods=['POST'])
 def clear_all():
-    """清空所有记录（需管理员密码）"""
     try:
         data = request.get_json(force=True) or {}
         token = request.headers.get('X-SESSION-TOKEN')
@@ -252,7 +254,8 @@ def clear_all():
         admin_pw = (data.get('admin_password') or '').strip()
         if not admin_pw or hash_password(admin_pw) != hash_password(ADMIN_PASSWORD):
             return jsonify({'success': False, 'message': '管理员密码错误'}), 401
-        save_data([])
+        with _data_lock:
+            save_data([])
         logging.info(f"clear_all, ip: {get_client_ip()}")
         return jsonify({'success': True, 'message': '所有记录已清空'})
     except Exception as e:

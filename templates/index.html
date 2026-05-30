@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>在线剪切板</title>
-    <script src="{{ url_for('static', filename='js/tailwind.js') }}"></script>
+    <script src="https://cdn.tailwindcss.com/3.4.1"></script>
     <link href="{{ url_for('static', filename='css/font-awesome.min.css') }}" rel="stylesheet">
     <script>
         tailwind.config = {
@@ -54,12 +54,7 @@
             transition: transform 0.3s ease, opacity 0.3s ease;
         }
 
-        /* 文本内容加载动画 */
-        .text-loading {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
+        /* 文本内容渐入动画 */
         .text-loading-content {
             opacity: 0;
             transform: translateY(12px);
@@ -124,9 +119,11 @@
 
                 <button
                     type="submit"
-                    class="w-full bg-primary hover:bg-primary/90 text-white font-medium py-3 px-4 rounded-lg transition-colors"
+                    id="saveBtn"
+                    class="w-full bg-primary hover:bg-primary/90 text-white font-medium py-3 px-4 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                    <i class="fa fa-save mr-2"></i>保存文本
+                    <span id="saveBtnText"><i class="fa fa-save mr-2"></i>保存文本</span>
+                    <span id="saveBtnLoading" class="hidden"><i class="fa fa-spinner fa-spin mr-2"></i>保存中...</span>
                 </button>
             </form>
         </main>
@@ -186,11 +183,8 @@
                 </button>
             </div>
 
-            <!-- 文本内容区域：先显示加载动画，再渐入文字 -->
+            <!-- 文本内容区域 -->
             <div id="textContent" class="p-5 overflow-y-auto flex-grow hidden">
-                <div id="textLoadingPlaceholder" class="text-loading w-full h-full py-12 hidden">
-                    <div class="spinner mb-3"></div>
-                </div>
                 <pre id="textBody" class="whitespace-pre-wrap break-all bg-gray-50 p-4 rounded-lg font-mono text-sm text-loading-content"></pre>
             </div>
 
@@ -284,17 +278,31 @@
         }
 
         function showNotification(msg, isError) {
-            const el = document.getElementById('notification');
-            el.textContent = msg;
-            el.className = 'notification fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 ' +
-                (isError ? 'bg-red-500 text-white' : 'bg-green-600 text-white');
-            el.style.transform = 'translateY(0)';
-            el.style.opacity = '1';
+            var el = document.getElementById('notification');
+            var stack = el._stack || [];
+            stack.push({ msg: msg, isError: isError, ts: Date.now() });
+            el._stack = stack;
+            if (el._active) return;
+            el._active = true;
+            function next() {
+                if (!el._stack || el._stack.length === 0) {
+                    el._active = false;
+                    el.style.transform = 'translateY(-100px)';
+                    el.style.opacity = '0';
+                    return;
+                }
+                var item = el._stack.shift();
+                el.textContent = item.msg;
+                el.className = 'notification fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 ' +
+                    (item.isError ? 'bg-red-500 text-white' : 'bg-green-600 text-white');
+                el.style.transform = 'translateY(0)';
+                el.style.opacity = '1';
+                el._timer = setTimeout(function () {
+                    next();
+                }, 1800);
+            }
             clearTimeout(el._timer);
-            el._timer = setTimeout(function () {
-                el.style.transform = 'translateY(-100px)';
-                el.style.opacity = '0';
-            }, 2500);
+            next();
         }
 
         function openModal(id) {
@@ -442,7 +450,9 @@
                 return;
             }
 
-            showTextLoading();
+            document.getElementById('textContent').classList.remove('hidden');
+            document.getElementById('textBody').classList.remove('show');
+            document.getElementById('textBody').textContent = '';
             loadTextContent(id, null)
                 .then(function (content) {
                     showTextWithAnimation(content);
@@ -451,35 +461,35 @@
                 .catch(function () { closeTextModal(); });
         }
 
-        function showTextLoading() {
-            var textContent = document.getElementById('textContent');
-            var loading = document.getElementById('textLoadingPlaceholder');
-            var body = document.getElementById('textBody');
-            textContent.classList.remove('hidden');
-            loading.classList.remove('hidden');
-            body.classList.remove('show');
-            body.textContent = '';
-        }
-
         function showTextWithAnimation(content) {
-            var loading = document.getElementById('textLoadingPlaceholder');
             var body = document.getElementById('textBody');
-            loading.classList.add('hidden');
             body.textContent = content;
             requestAnimationFrame(function () {
                 body.classList.add('show');
             });
         }
 
+        var _submitting = false;
+
+        function setSubmitting(active) {
+            _submitting = active;
+            var btn = document.getElementById('saveBtn');
+            document.getElementById('saveBtnText').className = active ? 'hidden' : '';
+            document.getElementById('saveBtnLoading').className = active ? '' : 'hidden';
+            btn.disabled = active;
+        }
+
         function setupEventListeners() {
             document.getElementById('textForm').addEventListener('submit', function (e) {
                 e.preventDefault();
+                if (_submitting) return;
                 var text = document.getElementById('textInput').value.trim();
                 var password = document.getElementById('passwordInput').value.trim();
                 if (!text) {
                     showNotification('请输入文本内容', true);
                     return;
                 }
+                setSubmitting(true);
                 apiFetch('/api/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -491,12 +501,14 @@
                         showNotification('文本保存成功');
                         document.getElementById('textInput').value = '';
                         document.getElementById('passwordInput').value = '';
+                        localStorage.removeItem('clipboard_draft');
                         loadHistory();
                     } else {
                         showNotification(data.message || '保存失败', true);
                     }
                 })
-                .catch(function () { showNotification('网络错误，请检查', true); });
+                .catch(function () { showNotification('网络错误，请检查', true); })
+                .finally(function () { setSubmitting(false); });
             });
 
             document.getElementById('generatePassword').addEventListener('click', function () {
@@ -512,7 +524,9 @@
                 if (!pw) { showNotification('请输入密码', true); return; }
                 if (!state.currentTextId) return;
 
-                showTextLoading();
+                document.getElementById('textContent').classList.remove('hidden');
+                document.getElementById('textBody').classList.remove('show');
+                document.getElementById('textBody').textContent = '';
                 loadTextContent(state.currentTextId, pw)
                     .then(function (content) {
                         state.currentPassword = pw;
@@ -531,7 +545,6 @@
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     navigator.clipboard.writeText(text).then(function () {
                         showNotification('已复制到剪贴板');
-                        closeTextModal();
                     }).catch(function () { showNotification('复制失败', true); });
                 } else {
                     try {
@@ -542,7 +555,6 @@
                         document.execCommand('copy');
                         document.body.removeChild(ta);
                         showNotification('已复制到剪贴板');
-                        closeTextModal();
                     } catch (e) {
                         showNotification('复制失败', true);
                     }
@@ -640,10 +652,80 @@
             });
         }
 
+        function setupPasswordEnterKeys() {
+            var modalPw = document.getElementById('modalPasswordInput');
+            if (modalPw) {
+                modalPw.addEventListener('keydown', function (e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        document.getElementById('verifyPassword').click();
+                    }
+                });
+            }
+            var adminPw = document.getElementById('adminPasswordInput');
+            if (adminPw) {
+                adminPw.addEventListener('keydown', function (e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        document.getElementById('confirmClearAll').click();
+                    }
+                });
+            }
+        }
+
+        function setupKeyboardShortcuts() {
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape') {
+                    var modals = [
+                        document.getElementById('textModal'),
+                        document.getElementById('deleteModal'),
+                        document.getElementById('clearAllModal')
+                    ];
+                    for (var i = 0; i < modals.length; i++) {
+                        if (modals[i] && modals[i].classList.contains('open')) {
+                            e.preventDefault();
+                            if (modals[i].id === 'textModal') closeTextModal();
+                            else closeModal(modals[i].id);
+                            return;
+                        }
+                    }
+                }
+                if (e.ctrlKey && e.key === 'Enter') {
+                    var textInput = document.getElementById('textInput');
+                    if (textInput && document.activeElement === textInput) {
+                        e.preventDefault();
+                        document.getElementById('saveBtn').click();
+                    }
+                }
+            });
+        }
+
+        function setupDraftSave() {
+            var draft = localStorage.getItem('clipboard_draft');
+            if (draft) {
+                document.getElementById('textInput').value = draft;
+            }
+            var draftTimer;
+            document.getElementById('textInput').addEventListener('input', function () {
+                clearTimeout(draftTimer);
+                var val = this.value;
+                draftTimer = setTimeout(function () {
+                    if (val) {
+                        localStorage.setItem('clipboard_draft', val);
+                    } else {
+                        localStorage.removeItem('clipboard_draft');
+                    }
+                }, 500);
+            });
+        }
+
         document.addEventListener('DOMContentLoaded', function () {
             loadHistory();
             setupEventListeners();
             setupPasswordToggles();
+            setupPasswordEnterKeys();
+            setupKeyboardShortcuts();
+            setupDraftSave();
         });
     </script>
 </body>
