@@ -252,8 +252,10 @@ function setupEventListeners() {
 
     document.getElementById('generatePassword').addEventListener('click', function () {
         var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+        var randomValues = new Uint32Array(6);
+        crypto.getRandomValues(randomValues);
         var pw = '';
-        for (var i = 0; i < 6; i++) pw += chars[Math.floor(Math.random() * chars.length)];
+        for (var i = 0; i < 6; i++) pw += chars[randomValues[i] % chars.length];
         document.getElementById('passwordInput').value = pw;
         showNotification('已生成随机密码: ' + pw);
     });

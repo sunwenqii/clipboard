@@ -75,6 +75,9 @@ def generate_session_token():
     """生成前端会话令牌"""
     token = secrets.token_hex(16)
     ISSUED_TOKENS[token] = time.time()
+    # 每次生成新令牌时顺便清理过期令牌
+    if len(ISSUED_TOKENS) > 1000:  # 超过阈值再清理，避免频繁遍历
+        cleanup_expired_tokens()
     return token
 
 
@@ -146,7 +149,8 @@ def save_text():
         client_ip = get_client_ip()
         with _data_lock:
             all_data = load_data()
-            text_id = max((int(x.get('id', 0)) for x in all_data), default=0) + 1
+            # 使用时间戳微秒 + 随机数避免 ID 冲突
+            text_id = int(time.time() * 1_000_000) % 9_999_999_999
             text_data = {
                 'id': text_id,
                 'content': text,
